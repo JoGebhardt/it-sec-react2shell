@@ -1,0 +1,16 @@
+{
+  "name": "react2shell-ctf",
+  "version": "1.0.0",
+  "description": "CTF Challenge - React2Shell Vulnerability Demo",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "next": "16.0.6",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  }
+}
