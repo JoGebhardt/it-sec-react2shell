@@ -20,6 +20,12 @@ npm install
 npm run dev
 ```
 
+With HTTPS (auto-generates local certificates):
+
+```bash
+npm run dev:https
+```
+
 For production mode:
 
 ```bash
@@ -30,4 +36,5 @@ npm start
 
 ## Access
 
-Open http://localhost:3000 in your browser.
+- HTTP: http://localhost:3000
+- HTTPS: https://localhost:3000 (when using `dev:https`)
