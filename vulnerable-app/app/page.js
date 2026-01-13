@@ -107,7 +107,7 @@ export default function Home() {
         color: '#666',
         borderTop: '1px solid #ddd'
       }}>
-        <p>© 2025 QuickShop - Powered by Next.js {process.env.NEXT_VERSION || '16.x'}</p>
+        <p>© 2025 QuickShop - Powered by Next.js {process.env.NEXT_VERSION || '16.0.6'}</p>
       </footer>
     </div>
   );
