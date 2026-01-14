@@ -4,7 +4,8 @@ Welcome! In this challenge, you'll be exploring a vulnerable Ubuntu machine runn
 
 **Target IP address:** `_______________`
 
-Your mission: Exploit the vulnerability and capture the flag with the secret code!
+Your mission: Exploit the vulnerability and capture the flag hidden on the machine. On the flag is
+a secret code of 3 digits. What is the code?
 
 ---
 
@@ -64,6 +65,7 @@ Maybe a quick search on Google or a visit to CVE databases could help.
 <summary>Solution</summary>
 
 There's a critical vulnerability known as "React2Shell" (CVE-2025-55182 / CVE-2025-66478) affecting this version.
+CVE-2025-55182 is main vulnerability and CVE-2025-66478 the advisory that tracks the downstream impact on Next.js.
 
 </details>
 
@@ -75,6 +77,8 @@ There's a critical vulnerability known as "React2Shell" (CVE-2025-55182 / CVE-20
 <summary><strong>Step 4</strong></summary>
 
 Great find! Now let's see if there's an existing exploit we can use. Metasploit might have something useful for us.
+
+It may happen that Metasploit doesn't have the latest database. If that's the case, look below on how to install the React2Shell exploit module manually.
 
 <details>
 <summary>Hint</summary>
@@ -92,6 +96,26 @@ search react2shell OR search 55182
 <summary>Solution</summary>
 
 There's a ready-to-use module: `exploit/multi/http/react2shell_unauth_rce_cve_2025_55182`
+
+</details>
+
+<details>
+<summary>Install the React2Shell exploit module</summary>
+
+The repository contains the Metasploit module for the React2Shell vulnerability.
+Run the following command from this repository to install it:
+
+```bash
+bash install_exploit.sh
+```
+
+This copies the exploit module to `~/.msf4/modules/exploits/multi/http/`.
+
+Then in Metasploit, reload the modules to make it available:
+
+```bash
+reload_all
+```
 
 </details>
 
