@@ -34,6 +34,8 @@ npm run build
 npm start
 ```
 
+Put the flag in `flag.txt` in the project root.
+
 ## Access
 
 - HTTP: http://localhost:3000

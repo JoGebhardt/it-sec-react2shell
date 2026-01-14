@@ -83,7 +83,7 @@ Fire up Metasploit and search for the vulnerability:
 
 ```bash
 msfconsole
-search react2shell
+search react2shell OR search 55182
 ```
 
 </details>
