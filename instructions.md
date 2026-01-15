@@ -2,7 +2,7 @@
 
 Welcome! In this challenge, you'll be exploring a vulnerable Ubuntu machine running a web service with a critical security flaw.
 
-**Target IP address:** `_______________`
+**Target IP address:** `172.29.41.228`
 
 Your mission: Exploit the vulnerability and capture the flag hidden on the machine. On the flag is
 a secret code of 3 digits. What is the code?
